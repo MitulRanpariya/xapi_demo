@@ -69,12 +69,18 @@
                     callback: callback
                 });
             },
-            get: function(){
-                var stateResult = tincan.getState("bookmarking-data");
-                if (stateResult.err === null && stateResult.state !== null && stateResult.state.contents !== "") {
-                    return stateResult.state.contents;
-                }
-                return null;
+            // Async version of get — replaces sync XHR which is blocked when calling
+            // from a public HTTPS page (GitHub Pages) to localhost (Chrome PNA policy).
+            getAsync: function(callback){
+                tincan.getState("bookmarking-data", {
+                    callback: function(err, state) {
+                        if (err === null && state !== null && state.contents !== "") {
+                            callback(state.contents);
+                        } else {
+                            callback(null);
+                        }
+                    }
+                });
             },
             setStartDuration: function(duration){
                 this.startAttemptDuration = duration;
@@ -150,7 +156,7 @@
         function doStart(){
             //get the iFrame sized correctly and set up
             SetupIFrame();
-            
+
             var statements = [];
             statements.push({
                 verb: {
@@ -177,42 +183,40 @@
                 }
             };
 
-            //get activity_id bookmark if it exists
-            var bookmark = bookmarkingData.get();
-            if (bookmark !== null) {
-                if (confirm("Would you like to resume from where you previously left off? Click cancel to start a afresh.")) {
-                    bookmarkingData.initFromBookmark(bookmark);
-                    if (!bookmarkingData.getCompletion()) {
-                        var resumedStatement = {
-                            verb: {
-                                id: "http://adlnet.gov/expapi/verbs/resumed",
-                                display: {
-                                    "en-US": "resumed"
+            // Use async getState so Chrome's Private Network Access (PNA) preflight works.
+            // Sync XHR from public HTTPS (GitHub Pages) to localhost is blocked by PNA.
+            bookmarkingData.getAsync(function(bookmark) {
+                if (bookmark !== null) {
+                    if (confirm("Would you like to resume from where you previously left off? Click Cancel to start afresh.")) {
+                        bookmarkingData.initFromBookmark(bookmark);
+                        if (!bookmarkingData.getCompletion()) {
+                            var resumedStatement = {
+                                verb: {
+                                    id: "http://adlnet.gov/expapi/verbs/resumed",
+                                    display: {
+                                        "en-US": "resumed"
+                                    }
+                                },
+                                context: GolfExample.getContext(),
+                                result: {
+                                    duration: TinCan.Utils.convertMillisecondsToISO8601Duration(bookmark.attemptDuration)
                                 }
-                            },
-                            context: GolfExample.getContext(),
-                            result: {
-                                duration: TinCan.Utils.convertMillisecondsToISO8601Duration(bookmark.attemptDuration)
-                            }
-                        };
-                        statements.push(resumedStatement);
+                            };
+                            statements.push(resumedStatement);
+                        }
+                    } else {
+                        bookmarkingData.reset();
+                        statements.push(attemptedStatement);
+                        bookmarkingData.save();
                     }
-                }
-                else {
-                    bookmarkingData.reset();
-
-                    //start new attempt
+                } else {
+                    // No saved bookmark — start from the beginning
+                    bookmarkingData.setPage(0);
                     statements.push(attemptedStatement);
-                    bookmarkingData.save();
                 }
-            }
-            else {
-                // if there isn't a stored bookmark, start the user at the first page
-                bookmarkingData.setPage(0);
-                statements.push(attemptedStatement);
-            }
-            tincan.sendStatements(statements);
-            goToPage();
+                tincan.sendStatements(statements);
+                goToPage();
+            });
         }
 
         function goToPage(){
@@ -241,6 +245,18 @@
             }
 
             bookmarkingData.save();
+
+            // Notify parent POC of current page so it can include position in suspend state
+            if (window.parent !== window) {
+                window.parent.postMessage({
+                    type: 'xapi-state',
+                    data: {
+                        currentPage: bookmarkingData.getPage(),
+                        totalPages: pageArray.length,
+                        pageName: pageArray[bookmarkingData.getPage()]
+                    }
+                }, '*');
+            }
         }
 
         function doPrevious(){
